@@ -1,38 +1,83 @@
 import React, { useEffect, useMemo, useState } from "react";
 
 /*
-Tablero Familiar Interactivo – MVP táctil (v3.3.1)
-- Corrige error JSX: se había quedado un bloque sin cerrar en AdminPanel → recompensas.
-- Implementa dos niveles: Personalizar (sin PIN) y Ajustes (con PIN).
-- Personalización: color, fondo, opacidad fondo, opacidad por panel.
-- Botones y textos clave siempre sólidos; paneles translúcidos.
-- Cabecera: día de semana y fecha más visible.
+Tablero Familiar Interactivo – PWA (v3.3.1-TS)
+- Dos niveles: Personalizar (sin PIN) y Ajustes (con PIN).
+- Color, fondo (URL o archivo), opacidad fondo y por panel con preview.
+- Metas visibles: ∞ | 0m | Xm.
+- Persistencia localStorage.
 */
 
-// ---------- Utilidades generales ----------
-const LS_KEY = "tfi_state_v3_3_1";
-const nowISO = () => new Date().toISOString();
-const todayDate = new Date();
-const todayKey = () => todayDate.toLocaleDateString("en-CA"); // YYYY-MM-DD
-const weekdayLong = todayDate.toLocaleDateString("es-ES", { weekday: "long", day: "2-digit", month: "long", year: "numeric" });
-const CATS = ["personales", "familiares", "crecimiento"];
+type CatKey = "personales" | "familiares" | "crecimiento";
+type PanelKey = CatKey | "tv" | "vg";
 
-function loadState() {
+type Tasks = Record<CatKey, string[]>;
+type DoneMap = Record<CatKey, Record<string, boolean>>;
+
+interface ChildTheme {
+  color: string;
+  background: string;
+  opacity: number; // % overlay fondo
+  panelOpacity: Record<PanelKey, number>; // % por panel
+}
+
+interface Child {
+  id: string;
+  name: string;
+  age: number;
+  theme: ChildTheme;
+  tasks: Tasks;
+}
+
+interface PhaseCfg {
+  videogamesMin: number | null;
+  tvMin: number | null;
+}
+
+interface State {
+  createdAt: string;
+  pin: string;
+  phase: "Fase 1" | "Fase 2" | "Fase 3";
+  phases: Record<string, PhaseCfg>;
+  theme: { background: string };
+  rewards: string[];
+  children: Child[];
+  records: Record<
+    string, // day
+    Record<
+      string, // childId
+      { done: DoneMap; timers: { tv: number; vg: number } }
+    >
+  >;
+}
+
+// ---------- Utilidades ----------
+const LS_KEY = "tfi_state_v3_3_1";
+const todayDate = new Date();
+const todayKey = () => todayDate.toLocaleDateString("en-CA");
+const weekdayLong = todayDate.toLocaleDateString("es-ES", {
+  weekday: "long",
+  day: "2-digit",
+  month: "long",
+  year: "numeric",
+});
+const nowISO = () => new Date().toISOString();
+const CATS: CatKey[] = ["personales", "familiares", "crecimiento"];
+
+const asArray = <T,>(v: T[] | undefined): T[] => (Array.isArray(v) ? v : []);
+
+function loadState(): State | null {
   try {
     const raw = localStorage.getItem(LS_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw);
+    return raw ? (JSON.parse(raw) as State) : null;
   } catch {
     return null;
   }
 }
-function saveState(s) {
+function saveState(s: State) {
   localStorage.setItem(LS_KEY, JSON.stringify(s));
 }
-
-// Helpers
-const asArray = (v) => (Array.isArray(v) ? v : []);
-function safeTasks(tasks) {
+function safeTasks(tasks?: Partial<Tasks>): Tasks {
   const t = tasks || {};
   return {
     personales: asArray(t.personales),
@@ -40,9 +85,9 @@ function safeTasks(tasks) {
     crecimiento: asArray(t.crecimiento),
   };
 }
-function buildSafeDone(tasks, prevDone) {
-  const prev = prevDone && typeof prevDone === "object" ? prevDone : {};
-  const next = { ...prev };
+function buildSafeDone(tasks: Tasks, prevDone?: DoneMap): DoneMap {
+  const prev = prevDone && typeof prevDone === "object" ? prevDone : ({} as DoneMap);
+  const next: DoneMap = { personales: {}, familiares: {}, crecimiento: {} };
   CATS.forEach((cat) => {
     const list = asArray(tasks[cat]);
     next[cat] = { ...(prev[cat] || {}) };
@@ -52,25 +97,23 @@ function buildSafeDone(tasks, prevDone) {
   });
   return next;
 }
-function countDone(done) {
+function countDone(done: DoneMap): number {
   return CATS.reduce(
     (acc, cat) => acc + Object.values(done?.[cat] || {}).filter(Boolean).length,
     0
   );
 }
-function countTotalTasks(tasks) {
+function countTotalTasks(tasks: Tasks): number {
   return CATS.reduce((acc, cat) => acc + asArray(tasks[cat]).length, 0);
 }
-
-// Metas visibles coherentes
-function formatMetaLabel(value) {
+function formatMetaLabel(value: number | null | undefined): string {
   if (value === null || value === undefined) return "∞";
   if (value === 0) return "0m";
   return `${value}m`;
 }
 
 // ---------- Estado por defecto ----------
-const COMMON_TASKS = {
+const COMMON_TASKS: Tasks = {
   personales: [
     "Hacer la cama",
     "Lavarse las manos al volver",
@@ -85,26 +128,24 @@ const COMMON_TASKS = {
   ],
   crecimiento: ["Leer 1 versículo o historia", "Agradecer por el día"],
 };
-
 const DEFAULT_REWARDS = [
   "Elegir película del viernes",
   "Postre especial",
   "Dormir 15 min más tarde",
   "Elegir juego de mesa",
 ];
-
-const DEFAULT_THEME = {
+const DEFAULT_THEME: ChildTheme = {
   color: "#2563eb",
   background: "",
-  opacity: 40, // overlay del fondo
-  panelOpacity: { personales: 70, familiares: 70, crecimiento: 70, tv: 70, vg: 70 }, // %
+  opacity: 40,
+  panelOpacity: { personales: 70, familiares: 70, crecimiento: 70, tv: 70, vg: 70 },
 };
-const DEFAULT_THEME_OLI = { ...DEFAULT_THEME, color: "#a78bfa" };
+const DEFAULT_THEME_OLI: ChildTheme = { ...DEFAULT_THEME, color: "#a78bfa" };
 
-const DEFAULT_STATE = {
+const DEFAULT_STATE: State = {
   createdAt: nowISO(),
   pin: "1234",
-  phase: "Fase 2", // Fase 1 | Fase 2 | Fase 3
+  phase: "Fase 2",
   phases: {
     "Fase 1": { videogamesMin: 90, tvMin: null },
     "Fase 2": { videogamesMin: 60, tvMin: 120 },
@@ -119,72 +160,87 @@ const DEFAULT_STATE = {
   records: {},
 };
 
-// ---------- Hooks de estado app ----------
+// ---------- Hooks ----------
 function useAppState() {
-  const [state, setState] = useState(() => loadState() || DEFAULT_STATE);
+  const [state, setState] = useState<State>(() => loadState() || DEFAULT_STATE);
   useEffect(() => saveState(state), [state]);
-  return [state, setState];
+  return [state, setState] as const;
 }
-
-function ensureDay(state, setState) {
+function ensureDay(state: State, setState: (s: State) => void) {
   const d = todayKey();
   if (!state.records[d]) {
-    const next = { ...state, records: { ...state.records, [d]: {} } };
+    const next: State = { ...state, records: { ...state.records, [d]: {} } };
     setState(next);
     return next;
   }
   return state;
 }
-
-function getDayChild(state, childId) {
+function getDayChild(state: State, childId: string) {
   const d = todayKey();
-  const base = state.records[d]?.[childId] || { done: {}, timers: { tv: 0, vg: 0 } };
-  return base;
+  return state.records[d]?.[childId] || { done: buildSafeDone(COMMON_TASKS), timers: { tv: 0, vg: 0 } };
 }
-
-function setDayChild(state, setState, childId, updater) {
+function setDayChild(
+  state: State,
+  setState: (s: State) => void,
+  childId: string,
+  updater: (e: { done: DoneMap; timers: { tv: number; vg: number } }) => { done: DoneMap; timers: { tv: number; vg: number } }
+) {
   const d = todayKey();
   const current = getDayChild(state, childId);
   const nextEntry = updater(current);
-  const next = {
+  const next: State = {
     ...state,
     records: { ...state.records, [d]: { ...(state.records[d] || {}), [childId]: nextEntry } },
   };
   setState(next);
 }
 
-// ---------- UI básicos ----------
-const Pill = ({ children, style }) => (
+// ---------- UI ----------
+const Pill: React.FC<React.PropsWithChildren<{ style?: React.CSSProperties }>> = ({ children, style }) => (
   <span className="inline-block rounded-full border px-3 py-1 text-xs font-medium" style={style}>
     {children}
   </span>
 );
-function SectionTitle({ children }) {
-  return <h3 className="text-sm font-semibold uppercase tracking-wide">{children}</h3>;
-}
-function ProgressBar({ value, barColor = "#000" }) {
-  return (
-    <div className="w-full h-3 bg-gray-200 rounded-full">
-      <div className="h-3 rounded-full" style={{ width: `${Math.min(100, Math.max(0, value))}%`, backgroundColor: barColor }} />
-    </div>
-  );
-}
-function BigButton({ children, onClick, style }) {
-  return (
-    <button onClick={onClick} style={style} className="w-full rounded-2xl border px-4 py-4 text-lg font-semibold active:scale-95">
-      {children}
-    </button>
-  );
-}
-function Toggle({ checked, onToggle, label, color }) {
-  return (
-    <button onClick={onToggle} className={`flex items-center gap-3 rounded-xl border px-3 py-2 ${checked ? "text-white" : "bg-white"}`} style={{ backgroundColor: checked ? color : "#fff", borderColor: color }}>
-      <div className="h-5 w-5 rounded" style={{ backgroundColor: checked ? "#fff" : color }} />
-      <span className="text-base">{label}</span>
-    </button>
-  );
-}
-function Timer({ seconds, onStart, onStop, running, color }) {
+const SectionTitle: React.FC<React.PropsWithChildren> = ({ children }) => (
+  <h3 className="text-sm font-semibold uppercase tracking-wide">{children}</h3>
+);
+const ProgressBar: React.FC<{ value: number; barColor?: string }> = ({ value, barColor = "#000" }) => (
+  <div className="w-full h-3 bg-gray-200 rounded-full">
+    <div className="h-3 rounded-full" style={{ width: `${Math.min(100, Math.max(0, value))}%`, backgroundColor: barColor }} />
+  </div>
+);
+const BigButton: React.FC<React.PropsWithChildren<{ onClick?: () => void; style?: React.CSSProperties }>> = ({
+  children,
+  onClick,
+  style,
+}) => (
+  <button onClick={onClick} style={style} className="w-full rounded-2xl border px-4 py-4 text-lg font-semibold active:scale-95">
+    {children}
+  </button>
+);
+const Toggle: React.FC<{ checked: boolean; onToggle: () => void; label: string; color: string }> = ({
+  checked,
+  onToggle,
+  label,
+  color,
+}) => (
+  <button
+    onClick={onToggle}
+    className={`flex items-center gap-3 rounded-xl border px-3 py-2 ${checked ? "text-white" : "bg-white"}`}
+    style={{ backgroundColor: checked ? color : "#fff", borderColor: color }}
+  >
+    <div className="h-5 w-5 rounded" style={{ backgroundColor: checked ? "#fff" : color }} />
+    <span className="text-base">{label}</span>
+  </button>
+);
+
+const Timer: React.FC<{
+  seconds: number;
+  running: boolean;
+  onStart: () => void;
+  onStop: () => void;
+  color: string;
+}> = ({ seconds, running, onStart, onStop, color }) => {
   const [local, setLocal] = useState(seconds);
   useEffect(() => setLocal(seconds), [seconds]);
   useEffect(() => {
@@ -192,24 +248,29 @@ function Timer({ seconds, onStart, onStop, running, color }) {
     const id = setInterval(() => setLocal((s) => s + 1), 1000);
     return () => clearInterval(id);
   }, [running]);
-  const fmt = (s) => {
-    const m = Math.floor(s / 60).toString().padStart(2, "0");
-    const r = (s % 60).toString().padStart(2, "0");
-    return `${m}:${r}`;
-  };
+  const fmt = (s: number) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
   return (
     <div className="flex items-center gap-2">
       <Pill style={{ borderColor: color }}>{fmt(local)}</Pill>
-      {!running ? <BigButton onClick={onStart} style={{ borderColor: color, color }}>▶ Iniciar</BigButton> : <BigButton onClick={onStop} style={{ borderColor: color, color }}>■ Detener</BigButton>}
+      {!running ? (
+        <BigButton onClick={onStart} style={{ borderColor: color, color }}>
+          ▶ Iniciar
+        </BigButton>
+      ) : (
+        <BigButton onClick={onStop} style={{ borderColor: color, color }}>
+          ■ Detener
+        </BigButton>
+      )}
     </div>
   );
-}
+};
 
 // ---------- Tarjeta Niño ----------
-function ChildFull({ child, state, setState }) {
+const ChildFull: React.FC<{ child: Child; state: State; setState: (s: State) => void }> = ({ child, state, setState }) => {
   state = ensureDay(state, setState);
   const entry = getDayChild(state, child.id);
-  const setEntry = (up) => setDayChild(state, setState, child.id, up);
+  const setEntry = (up: (e: { done: DoneMap; timers: { tv: number; vg: number } }) => { done: DoneMap; timers: { tv: number; vg: number } }) =>
+    setDayChild(state, setState, child.id, up);
 
   const tasks = useMemo(() => safeTasks(child.tasks), [child.tasks]);
   const safeDone = useMemo(() => buildSafeDone(tasks, entry.done), [tasks, entry.done]);
@@ -226,7 +287,7 @@ function ChildFull({ child, state, setState }) {
   const targetTV = level1 ? phaseCfg.tvMin : null;
   const targetVG = level2 ? phaseCfg.videogamesMin : null;
 
-  const [run, setRun] = useState({ tv: false, vg: false });
+  const [run, setRun] = useState<{ tv: boolean; vg: boolean }>({ tv: false, vg: false });
   useEffect(() => {
     if (!run.tv && !run.vg) return;
     const id = setInterval(() => {
@@ -240,12 +301,12 @@ function ChildFull({ child, state, setState }) {
     return () => clearInterval(id);
   }, [run]);
 
-  const pct = (curr, target) => {
-    if (target === null || target === undefined || target === 0) return 0;
+  const pct = (curr: number, target: number | null | undefined) => {
+    if (!target) return 0;
     return Math.min(100, Math.round((curr / (target * 60)) * 100));
   };
 
-  const toggleTask = (cat, t) => {
+  const toggleTask = (cat: CatKey, t: string) => {
     setEntry((curr) => {
       const baseTasks = safeTasks(child.tasks);
       const currDone = buildSafeDone(baseTasks, curr.done);
@@ -263,7 +324,7 @@ function ChildFull({ child, state, setState }) {
   const opacityPct = typeof child.theme?.opacity === "number" ? child.theme.opacity : 40;
   const overlayRGBA = `rgba(255,255,255,${Math.min(1, Math.max(0, opacityPct / 100))})`;
   const pOpacity = child.theme?.panelOpacity || DEFAULT_THEME.panelOpacity;
-  const panelRGBA = (percent) => `rgba(255,255,255,${Math.min(1, Math.max(0, percent / 100))})`;
+  const panelRGBA = (percent: number) => `rgba(255,255,255,${Math.min(1, Math.max(0, percent / 100))})`;
 
   return (
     <div className="w-full" style={{ aspectRatio: "16 / 9" }}>
@@ -278,13 +339,17 @@ function ChildFull({ child, state, setState }) {
         )}
         <div className="relative z-10 flex h-full w-full flex-col p-4">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-2xl font-extrabold" style={{ color }}>{child.name}</h2>
+            <h2 className="text-2xl font-extrabold" style={{ color }}>
+              {child.name}
+            </h2>
             <Pill style={{ borderColor: color }}>{state.phase}</Pill>
           </div>
 
           <div className="mb-2">
             <ProgressBar value={progress} barColor={color} />
-            <div className="mt-1 text-xs" style={{ color }}>{doneTasks}/{totalTasks} completadas</div>
+            <div className="mt-1 text-xs" style={{ color }}>
+              {doneTasks}/{totalTasks} completadas
+            </div>
           </div>
 
           <div className="grid flex-1 grid-cols-3 gap-3">
@@ -358,20 +423,23 @@ function ChildFull({ child, state, setState }) {
       </div>
     </div>
   );
-}
+};
 
-// ---------- Panel de Personalización (sin PIN) ----------
-function CustomizePanel({ state, setState, onClose, currentIndex }) {
-  const [children, setChildren] = useState(state.children);
+// ---------- Personalizar (sin PIN) ----------
+const CustomizePanel: React.FC<{
+  state: State;
+  setState: (s: State) => void;
+  onClose: () => void;
+  currentIndex: number;
+}> = ({ state, setState, onClose, currentIndex }) => {
+  const [children, setChildren] = useState<Child[]>(state.children);
   const c = children[currentIndex];
-
-  function patchChild(fn) {
+  function patchChild(fn: (ch: Child) => Child) {
     const arr = [...children];
     arr[currentIndex] = fn(arr[currentIndex]);
     setChildren(arr);
-    setState((prev) => ({ ...prev, children: arr }));
+    setState({ ...state, children: arr });
   }
-
   if (!c) return null;
 
   const theme = c.theme || DEFAULT_THEME;
@@ -379,47 +447,102 @@ function CustomizePanel({ state, setState, onClose, currentIndex }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="max-h-[90vh] w-full max-w-4xl overflow-auto rounded-2xl bg-white p-4">
+      <div className="max-h-[90vh] w-full max-w-4xl overflow-auto rounded-2xl bg-white p-4 text-black">
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-xl font-bold">Personalizar – {c.name}</h2>
-          <button className="rounded-xl border px-3 py-1" onClick={onClose}>Cerrar</button>
+          <button className="rounded-xl border px-3 py-1" onClick={onClose}>
+            Cerrar
+          </button>
         </div>
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
           <div>
             <div className="text-sm">Color principal</div>
-            <input type="color" className="mt-1 h-10 w-full rounded" value={theme.color} onChange={(e) => patchChild((ch) => ({ ...ch, theme: { ...(ch.theme || {}), color: e.target.value } }))} />
+            <input
+              type="color"
+              className="mt-1 h-10 w-full rounded"
+              value={theme.color}
+              onChange={(e) => patchChild((ch) => ({ ...ch, theme: { ...(ch.theme || DEFAULT_THEME), color: e.target.value } }))}
+            />
           </div>
           <div className="md:col-span-2">
             <div className="text-sm">Imagen de fondo (URL o archivo)</div>
-            <input className="mt-1 w-full rounded-xl border p-2" placeholder="https://..." value={theme.background} onChange={(e) => patchChild((ch) => ({ ...ch, theme: { ...(ch.theme || {}), background: e.target.value } }))} />
+            <input
+              className="mt-1 w-full rounded-xl border p-2"
+              placeholder="https://..."
+              value={theme.background}
+              onChange={(e) => patchChild((ch) => ({ ...ch, theme: { ...(ch.theme || DEFAULT_THEME), background: e.target.value } }))}
+            />
             <div className="mt-2 flex items-center gap-2">
-              <input type="file" accept="image/*" onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (!file) return;
-                const reader = new FileReader();
-                reader.onload = () => {
-                  const dataUrl = String(reader.result || "");
-                  patchChild((ch) => ({ ...ch, theme: { ...(ch.theme || {}), background: dataUrl } }));
-                };
-                reader.readAsDataURL(file);
-              }} />
-              <button className="rounded-xl border px-3 py-1 text-sm" onClick={() => patchChild((ch) => ({ ...ch, theme: { ...(ch.theme || {}), background: "" } }))}>Quitar fondo</button>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  const reader = new FileReader();
+                  reader.onload = () => {
+                    const dataUrl = String(reader.result || "");
+                    patchChild((ch) => ({ ...ch, theme: { ...(ch.theme || DEFAULT_THEME), background: dataUrl } }));
+                  };
+                  reader.readAsDataURL(file);
+                }}
+              />
+              <button
+                className="rounded-xl border px-3 py-1 text-sm"
+                onClick={() => patchChild((ch) => ({ ...ch, theme: { ...(ch.theme || DEFAULT_THEME), background: "" } }))}
+              >
+                Quitar fondo
+              </button>
             </div>
           </div>
           <div>
-            <div className="text-sm flex items-center justify-between"><span>Opacidad del fondo</span><span className="text-xs px-2 py-1 rounded-full border">{theme.opacity}%</span></div>
-            <input type="range" min={0} max={100} className="mt-3 w-full" value={theme.opacity} onChange={(e) => patchChild((ch) => ({ ...ch, theme: { ...(ch.theme || {}), opacity: Number(e.target.value) } }))} />
+            <div className="text-sm flex items-center justify-between">
+              <span>Opacidad del fondo</span>
+              <span className="text-xs px-2 py-1 rounded-full border">{theme.opacity}%</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              className="mt-3 w-full"
+              value={theme.opacity}
+              onChange={(e) => patchChild((ch) => ({ ...ch, theme: { ...(ch.theme || DEFAULT_THEME), opacity: Number(e.target.value) } }))}
+            />
           </div>
         </div>
 
         <div className="mt-6">
           <h3 className="text-sm font-semibold uppercase tracking-wide">Opacidad por panel</h3>
           <div className="mt-2 grid grid-cols-1 gap-3 md:grid-cols-2">
-            {[["personales","Personales"],["familiares","Familiares"],["crecimiento","Crecimiento"],["tv","TV"],["vg","Videojuegos"]].map(([key,label]) => (
+            {[
+              ["personales", "Personales"],
+              ["familiares", "Familiares"],
+              ["crecimiento", "Crecimiento"],
+              ["tv", "TV"],
+              ["vg", "Videojuegos"],
+            ].map(([key, label]) => (
               <div key={key} className="rounded-xl border p-3">
-                <div className="text-sm flex items-center justify-between"><span>{label}</span><span className="text-xs px-2 py-1 rounded-full border">{p[key]}%</span></div>
-                <input type="range" min={20} max={95} className="mt-2 w-full" value={p[key]} onChange={(e) => patchChild((ch) => ({ ...ch, theme: { ...(ch.theme || {}), panelOpacity: { ...(ch.theme?.panelOpacity || {}), [key]: Number(e.target.value) } } }))} />
+                <div className="text-sm flex items-center justify-between">
+                  <span>{label}</span>
+                  <span className="text-xs px-2 py-1 rounded-full border">{p[key as PanelKey]}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={20}
+                  max={95}
+                  className="mt-2 w-full"
+                  value={p[key as PanelKey]}
+                  onChange={(e) =>
+                    patchChild((ch) => ({
+                      ...ch,
+                      theme: {
+                        ...(ch.theme || DEFAULT_THEME),
+                        panelOpacity: { ...(ch.theme?.panelOpacity || DEFAULT_THEME.panelOpacity), [key as PanelKey]: Number(e.target.value) },
+                      },
+                    }))
+                  }
+                />
               </div>
             ))}
           </div>
@@ -427,24 +550,27 @@ function CustomizePanel({ state, setState, onClose, currentIndex }) {
       </div>
     </div>
   );
-}
+};
 
-// ---------- Panel Ajustes (con PIN) ----------
-function AdminPanel({ state, setState, onClose }) {
+// ---------- Ajustes (con PIN) ----------
+const AdminPanel: React.FC<{ state: State; setState: (s: State) => void; onClose: () => void }> = ({
+  state,
+  setState,
+  onClose,
+}) => {
   const [pinInput, setPinInput] = useState("");
   const [authed, setAuthed] = useState(false);
-  const [tab, setTab] = useState("fases");
+  const [tab, setTab] = useState<"fases" | "seguridad" | "tareas" | "recompensas">("fases");
 
   const [phase, setPhase] = useState(state.phase);
   const [pin, setPin] = useState(state.pin);
-  const [children, setChildren] = useState(state.children);
+  const [children, setChildren] = useState<Child[]>(state.children);
   const [appBg, setAppBg] = useState(state.theme?.background || "");
-  const [rewards, setRewards] = useState(state.rewards || DEFAULT_REWARDS);
+  const [rewards, setRewards] = useState<string[]>(state.rewards || DEFAULT_REWARDS);
 
   function save() {
     if (!authed) return;
-    const next = { ...state, pin, phase, children, rewards, theme: { ...(state.theme || {}), background: appBg } };
-    setState(next);
+    setState({ ...state, pin, phase, children, rewards, theme: { ...(state.theme || {}), background: appBg } });
     onClose();
   }
   function resetToday() {
@@ -454,7 +580,7 @@ function AdminPanel({ state, setState, onClose }) {
     next.records[d] = {};
     setState(next);
   }
-  function copyTasksToAll(fromIndex) {
+  function copyTasksToAll(fromIndex: number) {
     const base = children[fromIndex];
     if (!base) return;
     const baseTasks = safeTasks(base.tasks);
@@ -464,32 +590,58 @@ function AdminPanel({ state, setState, onClose }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="max-h-[90vh] w-full max-w-5xl overflow-auto rounded-2xl bg-white p-4">
+      <div className="max-h-[90vh] w-full max-w-5xl overflow-auto rounded-2xl bg-white p-4 text-black">
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-xl font-bold">Ajustes (Control parental)</h2>
-          <button className="rounded-xl border px-3 py-1" onClick={onClose}>Cerrar</button>
+          <button className="rounded-xl border px-3 py-1" onClick={onClose}>
+            Cerrar
+          </button>
         </div>
 
         {!authed ? (
           <div className="space-y-3">
             <div>
               <label className="text-sm font-medium">PIN actual</label>
-              <input type="password" className="mt-1 w-full rounded-xl border p-2" value={pinInput} onChange={(e) => setPinInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { setAuthed(pinInput === state.pin); } }} placeholder="1234" />
+              <input
+                type="password"
+                className="mt-1 w-full rounded-xl border p-2"
+                value={pinInput}
+                onChange={(e) => setPinInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") setAuthed(pinInput === state.pin);
+                }}
+                placeholder="1234"
+              />
             </div>
             <BigButton onClick={() => setAuthed(pinInput === state.pin)}>Acceder</BigButton>
           </div>
         ) : (
           <div className="space-y-6">
             <div className="flex flex-wrap gap-2">
-              {[["fases","Fases"],["seguridad","Seguridad"],["tareas","Tareas"],["recompensas","Recompensas"]].map(([k,label]) => (
-                <button key={k} className={`rounded-full border px-3 py-1 text-sm ${tab === k ? "bg-black text-white" : "bg-white"}`} onClick={() => setTab(k)}>{label}</button>
+              {[
+                ["fases", "Fases"],
+                ["seguridad", "Seguridad"],
+                ["tareas", "Tareas"],
+                ["recompensas", "Recompensas"],
+              ].map(([k, label]) => (
+                <button
+                  key={k}
+                  className={`rounded-full border px-3 py-1 text-sm ${tab === k ? "bg-black text-white" : "bg-white"}`}
+                  onClick={() => setTab(k as any)}
+                >
+                  {label}
+                </button>
               ))}
             </div>
 
             {tab === "fases" && (
               <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                 {Object.entries(state.phases).map(([k, v]) => (
-                  <button key={k} className={`rounded-2xl border p-3 text-left ${phase === k ? "bg-black text-white" : "bg-white"}`} onClick={() => setPhase(k)}>
+                  <button
+                    key={k}
+                    className={`rounded-2xl border p-3 text-left ${phase === k ? "bg-black text-white" : "bg-white"}`}
+                    onClick={() => setPhase(k as State["phase"])}
+                  >
                     <div className="text-lg font-semibold">{k}</div>
                     <div className="text-sm opacity-80">VG: {v.videogamesMin}m · TV: {v.tvMin != null ? `${v.tvMin}m` : "∞"}</div>
                   </button>
@@ -516,49 +668,71 @@ function AdminPanel({ state, setState, onClose }) {
                 {children.map((c, idx) => (
                   <div key={c.id} className="rounded-xl border p-3">
                     <div className="mb-2 flex flex-wrap gap-2">
-                      <input className="rounded-xl border p-2 font-semibold" value={c.name} onChange={(e) => {
+                      <input
+                        className="rounded-xl border p-2 font-semibold"
+                        value={c.name}
+                        onChange={(e) => {
                           const arr = [...children];
                           arr[idx] = { ...arr[idx], name: e.target.value };
                           setChildren(arr);
-                        }} />
-                      <input type="number" className="rounded-xl border p-2" value={c.age} onChange={(e) => {
+                        }}
+                      />
+                      <input
+                        type="number"
+                        className="rounded-xl border p-2"
+                        value={c.age}
+                        onChange={(e) => {
                           const arr = [...children];
                           arr[idx] = { ...arr[idx], age: Number(e.target.value) };
                           setChildren(arr);
-                        }} />
-                      <button className="rounded-xl border px-3 py-1 text-sm" onClick={() => copyTasksToAll(idx)}>Copiar tareas a todos</button>
+                        }}
+                      />
+                      <button className="rounded-xl border px-3 py-1 text-sm" onClick={() => copyTasksToAll(idx)}>
+                        Copiar tareas a todos
+                      </button>
                     </div>
                     {CATS.map((cat) => (
                       <div key={cat} className="mb-2">
                         <div className="text-sm font-semibold capitalize">{cat}</div>
-                        {asArray((c.tasks || {})[cat]).map((t, i) => (
+                        {asArray(c.tasks?.[cat]).map((t, i) => (
                           <div key={i} className="mt-1 flex gap-2">
-                            <input className="w-full rounded-xl border p-2" value={t} onChange={(e) => {
+                            <input
+                              className="w-full rounded-xl border p-2"
+                              value={t}
+                              onChange={(e) => {
                                 const arr = [...children];
-                                const tasks = safeTasks(arr[idx].tasks);
-                                const ts = [...tasks[cat]];
+                                const ts = asArray(arr[idx].tasks?.[cat]);
                                 ts[i] = e.target.value;
-                                arr[idx] = { ...arr[idx], tasks: { ...tasks, [cat]: ts } };
+                                arr[idx] = { ...arr[idx], tasks: { ...safeTasks(arr[idx].tasks), [cat]: ts } };
                                 setChildren(arr);
-                              }} />
-                            <button className="rounded-xl border px-2" onClick={() => {
+                              }}
+                            />
+                            <button
+                              className="rounded-xl border px-2"
+                              onClick={() => {
                                 const arr = [...children];
-                                const tasks = safeTasks(arr[idx].tasks);
-                                const ts = [...tasks[cat]];
+                                const ts = asArray(arr[idx].tasks?.[cat]);
                                 ts.splice(i, 1);
-                                arr[idx] = { ...arr[idx], tasks: { ...tasks, [cat]: ts } };
+                                arr[idx] = { ...arr[idx], tasks: { ...safeTasks(arr[idx].tasks), [cat]: ts } };
                                 setChildren(arr);
-                              }}>–</button>
+                              }}
+                            >
+                              –
+                            </button>
                           </div>
                         ))}
-                        <button className="mt-2 rounded-xl border px-3 py-1 text-sm" onClick={() => {
+                        <button
+                          className="mt-2 rounded-xl border px-3 py-1 text-sm"
+                          onClick={() => {
                             const arr = [...children];
-                            const tasks = safeTasks(arr[idx].tasks);
-                            const ts = [...tasks[cat]];
+                            const ts = asArray(arr[idx].tasks?.[cat]);
                             ts.push("Nueva tarea");
-                            arr[idx] = { ...arr[idx], tasks: { ...tasks, [cat]: ts } };
+                            arr[idx] = { ...arr[idx], tasks: { ...safeTasks(arr[idx].tasks), [cat]: ts } };
                             setChildren(arr);
-                          }}>+ Añadir</button>
+                          }}
+                        >
+                          + Añadir
+                        </button>
                       </div>
                     ))}
                   </div>
@@ -571,19 +745,30 @@ function AdminPanel({ state, setState, onClose }) {
                 <SectionTitle>Lista de recompensas</SectionTitle>
                 {rewards.map((r, i) => (
                   <div key={i} className="flex gap-2">
-                    <input className="w-full rounded-xl border p-2" value={r} onChange={(e) => {
+                    <input
+                      className="w-full rounded-xl border p-2"
+                      value={r}
+                      onChange={(e) => {
                         const arr = [...rewards];
                         arr[i] = e.target.value;
                         setRewards(arr);
-                      }} />
-                    <button className="rounded-xl border px-2" onClick={() => {
+                      }}
+                    />
+                    <button
+                      className="rounded-xl border px-2"
+                      onClick={() => {
                         const arr = [...rewards];
                         arr.splice(i, 1);
                         setRewards(arr);
-                      }}>–</button>
+                      }}
+                    >
+                      –
+                    </button>
                   </div>
                 ))}
-                <button className="rounded-xl border px-3 py-1 text-sm" onClick={() => setRewards((arr) => [...arr, "Nueva recompensa"]) }>+ Añadir recompensa</button>
+                <button className="rounded-xl border px-3 py-1 text-sm" onClick={() => setRewards((arr) => [...arr, "Nueva recompensa"])}>
+                  + Añadir recompensa
+                </button>
               </div>
             )}
 
@@ -596,14 +781,14 @@ function AdminPanel({ state, setState, onClose }) {
       </div>
     </div>
   );
-}
+};
 
 // ---------- App raíz ----------
-export default function App() {
+function App() {
   const [state, setState] = useAppState();
   const [showAdmin, setShowAdmin] = useState(false);
   const [showCustomize, setShowCustomize] = useState(false);
-  const [current, setCurrent] = useState(0); // índice del niño
+  const [current, setCurrent] = useState(0);
 
   const kids = state.children || [];
   const kid = kids[current] || kids[0];
@@ -614,28 +799,28 @@ export default function App() {
     const totals = kids.map((c) => {
       const tasks = safeTasks(c.tasks);
       const entry = state.records[d]?.[c.id] || {};
-      const done = buildSafeDone(tasks, entry.done);
+      const done = buildSafeDone(tasks, (entry as any).done);
       return { totalTasks: countTotalTasks(tasks), doneTasks: countDone(done) };
     });
     return totals.reduce(
       (acc, it) => ({ totalTasks: acc.totalTasks + it.totalTasks, doneTasks: acc.doneTasks + it.doneTasks }),
       { totalTasks: 0, doneTasks: 0 }
     );
-  }, [state, d]);
+  }, [state, d, kids]);
   const familyProgress = familyTotals.totalTasks > 0 ? (familyTotals.doneTasks / familyTotals.totalTasks) * 100 : 0;
 
-  // Tests de humo simples
+  // Smoke test
   useEffect(() => {
     try {
       const demoTasks = safeTasks(DEFAULT_STATE.children[0].tasks);
-      const demoDone = buildSafeDone(demoTasks, {});
-      console.assert(typeof demoDone.personales["Hacer la cama"] === "boolean", "Test smoke OK");
+      const demoDone = buildSafeDone(demoTasks, {} as any);
+      console.assert(typeof demoDone.personales["Hacer la cama"] === "boolean", "Smoke OK");
     } catch {}
   }, []);
 
   return (
     <div className="mx-auto max-w-6xl p-0">
-      {/* Header con contraste y fondo */}
+      {/* Header */}
       <div className="mb-3 w-full rounded-b-2xl p-4" style={{ background: "linear-gradient(180deg, #111, #222)", color: "#fff" }}>
         <div className="flex items-center justify-between">
           <div>
@@ -656,7 +841,7 @@ export default function App() {
           <ProgressBar value={familyProgress} barColor="#fff" />
           <div className="mt-1 text-xs opacity-80">Progreso familiar del día</div>
         </div>
-        {/* Selector de niño */}
+        {/* Selector niño */}
         <div className="mt-3 flex flex-wrap gap-2">
           {kids.map((c, i) => (
             <button
@@ -676,17 +861,16 @@ export default function App() {
         </div>
       </div>
 
-      {/* Pantalla completa 16:9 del niño actual */}
+      {/* Tablero 16:9 */}
       <div className="px-4">
         {kid && <ChildFull child={kid} state={state} setState={setState} />}
         <footer className="mt-4 text-center text-xs opacity-60 p-4">Hecho para uso familiar. Datos locales.</footer>
       </div>
 
-      {showCustomize && (
-        <CustomizePanel state={state} setState={setState} onClose={() => setShowCustomize(false)} currentIndex={current} />
-      )}
+      {showCustomize && <CustomizePanel state={state} setState={setState} onClose={() => setShowCustomize(false)} currentIndex={current} />}
       {showAdmin && <AdminPanel state={state} setState={setState} onClose={() => setShowAdmin(false)} />}
     </div>
   );
 }
+
 export default App;
